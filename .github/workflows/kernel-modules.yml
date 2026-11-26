@@ -22,7 +22,8 @@ jobs:
           path: linux
       - name: Dependencies
         run: |
-          sudo apt-get update
+          sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/microsoft*.sources
+          sudo apt-get update || true
           sudo apt-get install -y --no-install-recommends clang lld llvm bc flex bison libssl-dev libelf-dev cpio lz4 dwarves kmod
       - name: Build
         env:
