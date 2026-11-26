@@ -24,10 +24,24 @@ jobs:
         run: |
           sudo rm -f /etc/apt/sources.list.d/microsoft-prod.list /etc/apt/sources.list.d/microsoft*.sources
           sudo apt-get update || true
-          sudo apt-get install -y --no-install-recommends clang lld llvm bc flex bison libssl-dev libelf-dev cpio lz4 dwarves kmod
+          sudo apt-get install -y --no-install-recommends clang lld llvm bc flex bison libssl-dev libelf-dev cpio lz4 dwarves kmod ccache
+      - name: ccache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-yuechu-${{ github.run_id }}
+          restore-keys: |
+            ccache-yuechu-
       - name: Build
         env:
           EXTRA: ${{ inputs.extra_frag }}
+          CCACHE_DIR: /home/runner/.cache/ccache
+          CCACHE_MAXSIZE: 4G
+          CCACHE_COMPILERCHECK: content
+          CCACHE_SLOPPINESS: time_macros,include_file_mtime,include_file_ctime
+          KBUILD_BUILD_TIMESTAMP: "2026-01-01"
+          KBUILD_BUILD_USER: yuechu
+          KBUILD_BUILD_HOST: ci
         run: |
           set -euo pipefail
           cd linux
@@ -38,7 +52,7 @@ jobs:
           ARCH=arm64 scripts/kconfig/merge_config.sh -m $frags
           make ARCH=arm64 LLVM=1 LOCALVERSION=+ olddefconfig
           grep -E "MTK_CCCI_MAINLINE" .config | tee ../ccci-config.txt
-          make ARCH=arm64 LLVM=1 LOCALVERSION=+ -j"$(nproc)" Image dtbs modules
+          make ARCH=arm64 LLVM=1 LOCALVERSION=+ CC="ccache clang" -j"$(nproc)" Image dtbs modules
           mkdir -p ../out
           make ARCH=arm64 LLVM=1 LOCALVERSION=+ INSTALL_MOD_PATH=../out/mod INSTALL_MOD_STRIP=1 modules_install
           rm -f ../out/mod/lib/modules/*/build ../out/mod/lib/modules/*/source
@@ -50,6 +64,7 @@ jobs:
           make -s ARCH=arm64 LLVM=1 LOCALVERSION=+ kernelrelease | tee ../out/kernelrelease.txt
           tar -tzf ../out/modules.tar.gz | grep -iE "ccci|dpmaif|cldma" | tee ../out/ccci-modules.txt
           ls -la ../out
+          ccache -s | tee ../out/ccache-stats.txt
       - uses: actions/upload-artifact@v4
         with:
           name: kernel-yuechu-datapath
