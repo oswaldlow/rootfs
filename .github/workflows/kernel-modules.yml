@@ -1,0 +1,55 @@
+name: kernel-modules
+on:
+  workflow_dispatch:
+    inputs:
+      extra_frag:
+        description: "Extra config fragment(s) under configs/ (space separated)"
+        default: "configs/yuechu-datapath.config"
+
+permissions:
+  contents: read
+
+jobs:
+  kernel:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ github.repository_owner }}/linux
+          ref: 7.2-mt6895-xiaomi-yuechu
+          path: linux
+      - name: Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang lld llvm bc flex bison libssl-dev libelf-dev cpio lz4 dwarves kmod
+      - name: Build
+        env:
+          EXTRA: ${{ inputs.extra_frag }}
+        run: |
+          set -euo pipefail
+          cd linux
+          git log --oneline -1 | tee ../commit.txt
+          frags="arch/arm64/configs/defconfig arch/arm64/configs/yuechu.config ../configs/yuechu-container.config"
+          for f in $EXTRA; do frags="$frags ../$f"; done
+          [ -f ../configs/mt6895-fixups.config ] && frags="$frags ../configs/mt6895-fixups.config"
+          ARCH=arm64 scripts/kconfig/merge_config.sh -m $frags
+          make ARCH=arm64 LLVM=1 LOCALVERSION=+ olddefconfig
+          grep -E "MTK_CCCI_MAINLINE" .config | tee ../ccci-config.txt
+          make ARCH=arm64 LLVM=1 LOCALVERSION=+ -j"$(nproc)" Image dtbs modules
+          mkdir -p ../out
+          make ARCH=arm64 LLVM=1 LOCALVERSION=+ INSTALL_MOD_PATH=../out/mod INSTALL_MOD_STRIP=1 modules_install
+          rm -f ../out/mod/lib/modules/*/build ../out/mod/lib/modules/*/source
+          tar -C ../out/mod -czf ../out/modules.tar.gz lib
+          rm -rf ../out/mod
+          gzip -9 -n -c arch/arm64/boot/Image > ../out/Image.gz
+          cp .config ../out/config
+          cp ../commit.txt ../ccci-config.txt ../out/
+          make -s ARCH=arm64 LLVM=1 LOCALVERSION=+ kernelrelease | tee ../out/kernelrelease.txt
+          tar -tzf ../out/modules.tar.gz | grep -iE "ccci|dpmaif|cldma" | tee ../out/ccci-modules.txt
+          ls -la ../out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kernel-yuechu-datapath
+          path: out/*
