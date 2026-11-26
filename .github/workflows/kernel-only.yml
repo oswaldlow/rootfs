@@ -1,0 +1,58 @@
+name: kernel-only
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  kernel:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: A-upstream-vanilla
+            repo: MT6895-Mainline/linux
+            frag: ""
+          - variant: B-upstream-plus-container
+            repo: MT6895-Mainline/linux
+            frag: configs/yuechu-container.config
+          - variant: C-fork-patch-no-container
+            repo: oswaldlow/linux
+            frag: ""
+    name: ${{ matrix.variant }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: ${{ matrix.repo }}
+          ref: 7.2-mt6895-xiaomi-yuechu
+          path: linux
+      - name: Dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang lld llvm bc flex bison libssl-dev libelf-dev cpio lz4 dwarves
+      - name: Build
+        env:
+          FRAG: ${{ matrix.frag }}
+        run: |
+          set -euo pipefail
+          cd linux
+          git log --oneline -1 | tee ../commit.txt
+          frags="arch/arm64/configs/defconfig arch/arm64/configs/yuechu.config"
+          [ -z "$FRAG" ] || frags="$frags ../$FRAG"
+          [ -f ../configs/mt6895-fixups.config ] && frags="$frags ../configs/mt6895-fixups.config"
+          ARCH=arm64 scripts/kconfig/merge_config.sh -m $frags
+          make ARCH=arm64 LLVM=1 LOCALVERSION=+ olddefconfig
+          make ARCH=arm64 LLVM=1 LOCALVERSION=+ -j"$(nproc)" Image dtbs
+          mkdir -p ../out
+          gzip -9 -n -c arch/arm64/boot/Image > ../out/Image.gz
+          cp .config ../out/config
+          cp ../commit.txt ../out/
+          ls -la arch/arm64/boot/Image ../out
+      - uses: actions/upload-artifact@v4
+        with:
+          name: kernel-${{ matrix.variant }}
+          path: out/*
