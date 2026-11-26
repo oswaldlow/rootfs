@@ -63,7 +63,7 @@ jobs:
       - uses: actions/checkout@v4
         if: inputs.userspace_only == false
         with:
-          repository: MT6895-Mainline/linux
+          repository: ${{ github.repository_owner }}/linux
           ref: ${{ matrix.kernel }}
           path: linux
       - name: Dependencies
@@ -91,7 +91,7 @@ jobs:
         run: |
           set -euo pipefail
           args=(--device "$DEVICE" --distro "$DISTRO" --ui "$UI" --baseband "$BASEBAND"
-                --ts "$TS" --out "$PWD/out" --jobs 2 --tar)
+                --ts "$TS" --out "$PWD/out" --jobs "$(nproc)" --tar)
           if [ "$USERSPACE_ONLY" = true ]; then
             args+=(--rootfs-only)
           else
