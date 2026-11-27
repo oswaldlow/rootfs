@@ -1,0 +1,15 @@
+[Unit]
+Description=yuechu inbound filter on the cellular interfaces
+DefaultDependencies=no
+Wants=network-pre.target
+Before=network-pre.target shutdown.target
+Conflicts=shutdown.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/sbin/nft -f /etc/yuechu/cell-firewall.nft
+ExecStop=/usr/sbin/nft delete table inet yuechu_cell
+
+[Install]
+WantedBy=sysinit.target

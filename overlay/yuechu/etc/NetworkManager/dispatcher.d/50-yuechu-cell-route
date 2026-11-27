@@ -1,0 +1,41 @@
+#!/bin/sh
+# yuechu: answer connections that come in over the cellular link on that link.
+# With WiFi up the main default route is wlan0 (metric 600 < 700), so replies
+# from the carrier address leave via WiFi and are dropped upstream.  The kernel
+# has no CONFIG_NF_CONNTRACK_MARK, so use source rules instead, rebuilt from
+# the live state on every event: the ccmni name, prefix and gateway all change
+# between connections.  Run with no arguments to resync by hand.
+PREF=5943
+TBASE=5900
+
+case "${2:-}" in
+""|up|down|dhcp4-change|dhcp6-change|reapply) ;;
+*) exit 0 ;;
+esac
+
+for fam in -4 -6; do
+	while ip "$fam" rule del pref "$PREF" 2>/dev/null; do :; done
+done
+
+for dev in /sys/class/net/ccmni*; do
+	[ -e "$dev" ] || continue
+	ifc=${dev##*/}
+	table=$((TBASE + $(cat "$dev/ifindex")))
+	for fam in -4 -6; do
+		ip "$fam" route flush table "$table" 2>/dev/null
+		route=$(ip "$fam" route show default dev "$ifc" table main | head -n 1)
+		[ -n "$route" ] || continue
+		set -- $route
+		if [ "$2" = via ]; then
+			ip "$fam" route replace default via "$3" dev "$ifc" table "$table"
+		else
+			ip "$fam" route replace default dev "$ifc" table "$table"
+		fi
+		ip "$fam" route show dev "$ifc" table main proto kernel |
+		while read -r net _; do
+			case "$net" in fe80:*|default) continue ;; esac
+			ip "$fam" rule add from "$net" table "$table" pref "$PREF"
+		done
+	done
+done
+exit 0

@@ -1,0 +1,26 @@
+#!/usr/sbin/nft -f
+# yuechu: the cellular address is public (IPv6) and the phone also runs sshd
+# and Proxmox.  Only SSH (key-only) and ICMP are reachable over ccmni; WiFi,
+# USB and everything outbound are untouched.  Add ports to the accept rules.
+table inet yuechu_cell
+delete table inet yuechu_cell
+
+table inet yuechu_cell {
+	chain input {
+		type filter hook input priority filter; policy accept;
+		iifname != "ccmni*" accept
+		ct state established,related accept
+		ct state invalid drop
+		meta l4proto { icmp, ipv6-icmp } accept
+		tcp dport 22 accept
+		counter drop
+	}
+
+	chain forward {
+		type filter hook forward priority filter; policy accept;
+		iifname != "ccmni*" accept
+		ct state established,related accept
+		meta l4proto { icmp, ipv6-icmp } accept
+		counter drop
+	}
+}

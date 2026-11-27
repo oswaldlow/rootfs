@@ -14,4 +14,7 @@ device_finalize() {
 
 	# USB NCM gadget (169.254.42.1) for first access before WiFi is set up.
 	systemctl --root="$root" enable yuechu-usbnet.service
+
+	# Inbound filter on ccmni; return routing is 50-yuechu-cell-route.
+	systemctl --root="$root" enable yuechu-cell-firewall.service
 }
