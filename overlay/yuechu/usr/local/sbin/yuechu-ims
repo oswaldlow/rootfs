@@ -1,0 +1,117 @@
+#!/usr/bin/python3
+"""yuechu-ims: keep IMS (VoLTE) registered on both SIM slots of the MT6895 MD.
+
+The MD runs the IMS stack itself but only registers once the AP has enabled
+the IMS features and brought up the IMS PDN, which Android's telephony data
+framework does and Linux never did.  Per slot this daemon:
+  - writes IMS_SET_CONFIG (the MIPC form of AT+EIMSCFG): VoLTE, SMS over IMS
+    and emergency IMS on, video and Wi-Fi calling off;
+  - enables +CIREG reporting and, while the slot is on LTE/NR but IMS is not
+    registered, requests the IMS PDN (DATA_ACT_CALL, APN "ims", type ims).
+The PDN is owned by the MD and outlives this process.
+
+  yuechu-ims            run (systemd service)
+  yuechu-ims status     print IMS registration per slot
+"""
+import struct, sys, time
+sys.path.insert(0, "/usr/local/lib/yuechu")
+import yuechu_mipc as mp
+
+DEV = "/dev/ttyCMIPC4"
+SLOTS = (1, 2)
+POLL = 30
+# volte, vilte, vowifi, viwifi, sms, eims
+IMSCFG = bytes([1, 0, 0, 0, 1, 1])
+LTE_RATS = (7, 11, 12, 13)
+
+
+def log(msg):
+    print(msg, flush=True)
+
+
+def ims_pdn_request(apn=b"ims"):
+    desc = bytearray(672)
+    desc[1] = len(apn)
+    desc[4:4 + len(apn)] = apn
+    desc[414] = 0xff
+    t, u8, u32 = mp.tlv, mp.u8, mp.u32
+    # Same TLV order as the stock RIL / mm_mtk_mipc_data_act_request(), with
+    # APN type 2 (ims) and reuse flag 0 (set up a new PDN).
+    return (t(0x8106, b"\0") + t(0x010f, u32(0)) + t(0x8107, b"\0") + t(0x0108, u8(127)) +
+            t(0x0101, apn + b"\0") + t(0x0109, u32(0x7FFDFFFF)) + t(0x0102, u32(2)) +
+            t(0x010a, u8(0)) + t(0x0103, u8(3)) + t(0x010c, u32(0)) + t(0x0104, u8(3)) +
+            t(0x010d, bytes(desc)) + t(0x0105, u8(0)))
+
+
+def cireg(m, ps):
+    r = m.at(ps, "AT+CIREG?")
+    # +CIREG: <n>,<reg_info>[,<ext_info>]
+    try:
+        f = r.split(":", 1)[1].split("\n")[0].split(",")
+        return int(f[1]), int(f[2]) if len(f) > 2 else 0
+    except (IndexError, ValueError):
+        return None, None
+
+
+def slot_state(m, ps):
+    sim = m.req(mp.SIM_STATUS_REQ, ps)
+    rat = m.req(mp.NW_GET_RAT_REQ, ps).get(0x0100, b"\xff")[0]
+    return mp.result(sim) == 0, rat
+
+
+def configure(m, ps):
+    r = m.req(mp.IMS_SET_CONFIG_REQ, ps, mp.tlv(0x100, mp.u32(0)) + mp.tlv(0x102, IMSCFG))
+    m.at(ps, "AT+CIREG=2")
+    return mp.result(r)
+
+
+def status():
+    with mp.Mipc(DEV) as m:
+        for ps in SLOTS:
+            ok, rat = slot_state(m, ps)
+            reg, ext = cireg(m, ps)
+            feats = [n for b, n in ((1, "voice"), (2, "video"), (4, "sms")) if (ext or 0) & b]
+            print("slot %d  rat %s  IMS %s %s" % (ps, rat, "registered" if reg == 1 else "not registered",
+                                                  "(" + ", ".join(feats) + ")" if reg == 1 else ""))
+
+
+def run():
+    configured = set()
+    last_try = {}
+    was = {}
+    while True:
+        try:
+            with mp.Mipc(DEV) as m:
+                for ps in SLOTS:
+                    present, rat = slot_state(m, ps)
+                    if not present:
+                        configured.discard(ps)
+                        continue
+                    if ps not in configured:
+                        res = configure(m, ps)
+                        log("slot %d: IMS config volte/sms/eims on (result %s)" % (ps, res))
+                        configured.add(ps)
+                    reg, ext = cireg(m, ps)
+                    if reg != was.get(ps):
+                        log("slot %d: IMS %s (ext %s, rat %s)" % (ps, "registered" if reg == 1 else "not registered", ext, rat))
+                        was[ps] = reg
+                    if reg == 1 or rat not in LTE_RATS:
+                        continue
+                    if time.time() - last_try.get(ps, 0) < 120:
+                        continue
+                    last_try[ps] = time.time()
+                    r = m.req(mp.DATA_ACT_CALL_REQ, ps, ims_pdn_request(), timeout=40)
+                    log("slot %d: requested IMS PDN, result 0x%x call id %s" %
+                        (ps, mp.result(r) or 0, r.get(0x0100, b"?").hex()))
+        except OSError as e:
+            log("MIPC error: %s" % e)
+        time.sleep(POLL)
+
+
+if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "status":
+        status()
+    elif len(sys.argv) == 1:
+        run()
+    else:
+        sys.exit(__doc__)

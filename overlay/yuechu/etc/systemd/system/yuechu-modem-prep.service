@@ -1,0 +1,12 @@
+[Unit]
+Description=yuechu modem prerequisites (read-only NV mounts, vendor tree, data-path modules)
+After=local-fs.target systemd-udev-settle.service
+Wants=systemd-udev-settle.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+ExecStart=/usr/local/sbin/yuechu-modem-prep
+
+[Install]
+WantedBy=multi-user.target

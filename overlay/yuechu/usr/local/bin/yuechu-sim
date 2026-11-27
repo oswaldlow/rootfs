@@ -1,0 +1,88 @@
+#!/usr/bin/python3
+"""yuechu-sim: dual-SIM status and data-SIM switching on Xiaomi Civi 3 (MT6895).
+
+  yuechu-sim status        both slots: SIM, operator, registration, RAT, roaming
+  yuechu-sim data 1|2      make slot N the data SIM (AT+ESIMMAP via ModemManager)
+                           and bring up the NetworkManager gsm profile bound to
+                           that SIM's ICCID (gsm.sim-id)
+
+Both slots stay registered (DSDS) whichever one carries data.  Status comes
+from MIPC (/dev/ttyCMIPC2, ps = physical slot); ModemManager only models the
+data SIM.
+"""
+import os, re, select, struct, subprocess, sys, time
+
+import sys
+sys.path.insert(0, "/usr/local/lib/yuechu")
+from yuechu_mipc import Mipc, text
+
+DEV = "/dev/ttyCMIPC2"
+RAT = {0: "GSM", 1: "GSM", 2: "UMTS", 3: "EDGE", 4: "HSDPA", 5: "HSUPA", 6: "HSPA",
+       7: "LTE", 11: "NR5G-NSA", 12: "NR5G", 13: "NR5G"}
+REG = {0: "not registered", 1: "home", 2: "searching", 3: "denied", 4: "unknown", 5: "roaming"}
+
+def mm(*args):
+    return subprocess.run(["mmcli", "-m", "any", *args], capture_output=True, text=True).stdout
+
+def slot_iccids():
+    out = mm("-K")
+    paths = dict(re.findall(r"modem\.generic\.sim-slots\.value\[(\d+)\]\s*:\s*(\S+)", out))
+    primary = re.search(r"modem\.generic\.primary-sim-slot\s*:\s*(\d+)", out)
+    res = {}
+    for n, p in paths.items():
+        if p == "/":
+            continue
+        s = subprocess.run(["mmcli", "-i", p.rsplit("/", 1)[1], "-K"], capture_output=True, text=True).stdout
+        m = re.search(r"sim\.properties\.iccid\s*:\s*(\S+)", s)
+        o = re.search(r"sim\.properties\.operator-name\s*:\s*(.+)", s)
+        res[int(n)] = (m.group(1) if m else "?", o.group(1).strip() if o else "")
+    return res, int(primary.group(1)) if primary else 0
+
+def status():
+    sims, primary = slot_iccids()
+    m = Mipc(DEV)
+    for ps in (1, 2):
+        cs = m.req(0x042f, ps)
+        rat = m.req(0x042b, ps)
+        reg = m.req(0x0407, ps)
+        st = cs.get(0x8100, b"\xff")[0]
+        r = rat.get(0x0100, b"\xff")[0]
+        iccid, opname = sims.get(ps, ("?", ""))
+        print("slot %d%s  SIM %s (%s)" % (ps, "  [data]" if ps == primary else "", iccid, opname or "-"))
+        print("        network %s %s, %s, %s" % (text(reg.get(0x0107)), text(reg.get(0x0108)),
+                                                REG.get(st, "stat %d" % st), RAT.get(r, "rat %d" % r)))
+
+def data(slot):
+    sims, primary = slot_iccids()
+    if slot not in sims:
+        sys.exit("slot %d: no SIM" % slot)
+    if slot != primary:
+        print(mm("--set-primary-sim-slot=%d" % slot).strip())
+        for _ in range(60):
+            time.sleep(2)
+            s, p = slot_iccids()
+            st = mm()
+            if p == slot and ("state: registered" in st or "state: connected" in st):
+                break
+    iccid = sims[slot][0]
+    con = None
+    for l in subprocess.run(["nmcli", "-t", "-f", "NAME,TYPE", "c"], capture_output=True, text=True).stdout.splitlines():
+        name, _, typ = l.rpartition(":")
+        if typ == "gsm":
+            sid = subprocess.run(["nmcli", "-g", "gsm.sim-id", "c", "show", name], capture_output=True, text=True).stdout.strip()
+            if sid == iccid:
+                con = name
+            else:
+                subprocess.run(["nmcli", "c", "down", name], capture_output=True)
+    if not con:
+        sys.exit("no NetworkManager gsm profile with gsm.sim-id %s" % iccid)
+    r = subprocess.run(["nmcli", "c", "up", con], capture_output=True, text=True)
+    print((r.stdout or r.stderr).strip())
+
+if __name__ == "__main__":
+    if len(sys.argv) == 3 and sys.argv[1] == "data" and sys.argv[2] in ("1", "2"):
+        data(int(sys.argv[2]))
+    elif len(sys.argv) <= 2 and (len(sys.argv) == 1 or sys.argv[1] == "status"):
+        status()
+    else:
+        sys.exit(__doc__)
