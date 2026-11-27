@@ -1,6 +1,6 @@
 [Unit]
 Description=Keep IMS (VoLTE) registered on both SIM slots
-After=mm-mtk.service
+After=mtk-modemmanager.service
 Requires=mtk-ccci-owner.service
 After=mtk-ccci-owner.service
 

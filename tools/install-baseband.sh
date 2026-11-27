@@ -6,7 +6,7 @@ ROOTFS="" DEVICE="" DISTRO="" JOBS=2
 OWNER_REF=latest MM_REF=latest
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 usage() {
-	printf '%s\n' 'Usage: install-baseband.sh --root DIR --device qqcandy --distro mobian|arch|nura' \
+	printf '%s\n' 'Usage: install-baseband.sh --root DIR --device qqcandy|yuechu --distro mobian|arch|nura' \
 		'       [--owner-ref latest|COMMIT] [--mm-ref latest|COMMIT] [--jobs N]' \
 		'Offline installation only; does not start services, load modules or write NV.'
 }
@@ -22,7 +22,7 @@ while [ $# -gt 0 ]; do
 		*) die "unknown argument: $1" ;;
 	esac
 done
-[ "$DEVICE" = qqcandy ] || die 'only qqcandy has a reviewed baseband profile'
+case "$DEVICE" in qqcandy|yuechu) ;; *) die 'only qqcandy and yuechu have a reviewed baseband profile' ;; esac
 [ "$DISTRO" != pmos ] || DISTRO=nura
 case "$DISTRO" in mobian|debian|arch|nura) ;; *) die 'unsupported distribution' ;; esac
 [[ "$JOBS" =~ ^[1-9][0-9]*$ ]] || die 'invalid jobs'
@@ -179,12 +179,12 @@ mkdir -p "$ROOTFS/usr/lib/mtk-ccci/releases"
 mv "$SOURCE_DIR/stage$PREFIX" "$ROOTFS$PREFIX"
 RELEASE_CREATED=1
 install_integration
-python3 - "$ROOTFS$PREFIX/manifest.json" "$OWNER_COMMIT" "$MM_COMMIT" "$DISTRO" <<'PY'
+python3 - "$ROOTFS$PREFIX/manifest.json" "$OWNER_COMMIT" "$MM_COMMIT" "$DISTRO" "$DEVICE" <<'PY'
 import json
 from pathlib import Path
 import sys
 Path(sys.argv[1]).write_text(json.dumps({
-    "schema": 1, "device": "qqcandy", "distro": sys.argv[4],
+    "schema": 1, "device": sys.argv[5], "distro": sys.argv[4],
     "owner_commit": sys.argv[2], "mm_commit": sys.argv[3],
     "autostart": False, "hardware_validated": False,
 }, indent=2) + "\n")

@@ -1,16 +1,18 @@
 #!/bin/sh
-# yuechu: prepare everything the CCCI owner needs, before MD is started.
+# yuechu: prepare what the CCCI owner checks for, before the modem is started.
+# Read-only: mounts this device's NV partitions and its extracted vendor image.
 set -e
-# optional data-path HIFs (built as modules); only after they were validated once
+# Data-path HIFs (built as modules); enabled by yuechu-baseband-setup.
 if [ -e /etc/yuechu/datapath-ok ]; then
-  for m in $(cat /etc/yuechu/datapath-modules 2>/dev/null); do modprobe "$m" || echo "modprobe $m failed"; done
+	for m in $(cat /etc/yuechu/datapath-modules 2>/dev/null); do modprobe "$m" || echo "modprobe $m failed"; done
 fi
 for i in $(seq 1 30); do [ -e /dev/disk/by-partlabel/nvdata ] && break; sleep 1; done
 for m in "nvdata nvdata" "nvcfg nvcfg" "protect_f protect1" "protect_s protect2" "mcf_ota mcf_ota_a"; do
-  set -- $m; mkdir -p /mnt/vendor/$1
-  mountpoint -q /mnt/vendor/$1 || mount -t ext4 -o ro,noload,nodev,nosuid,noexec /dev/disk/by-partlabel/$2 /mnt/vendor/$1
+	set -- $m
+	mkdir -p /mnt/vendor/$1
+	mountpoint -q /mnt/vendor/$1 ||
+		mount -t ext4 -o ro,noload,nodev,nosuid,noexec /dev/disk/by-partlabel/$2 /mnt/vendor/$1
 done
+[ -d /var/lib/mtk-ccci/vendor/etc ] || { echo "no extracted vendor image; run yuechu-baseband-setup"; exit 1; }
 mkdir -p /vendor
-mountpoint -q /vendor || { mount --bind /var/lib/stock/vendor /vendor; mount -o remount,bind,ro /vendor; }
-# pin the running kernel for the owner's fail-closed preflight
-sed -i "s/^MTK_CCCI_EXPECTED_KERNEL=.*/MTK_CCCI_EXPECTED_KERNEL=$(uname -r)/; s/^MTK_CCCI_EXPECTED_NOTES_SHA256=.*/MTK_CCCI_EXPECTED_NOTES_SHA256=$(sha256sum /sys/kernel/notes | cut -d' ' -f1)/" /etc/default/mtk-ccci
+mountpoint -q /vendor || { mount --bind /var/lib/mtk-ccci/vendor /vendor; mount -o remount,bind,ro /vendor; }

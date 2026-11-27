@@ -1,0 +1,62 @@
+#!/bin/sh
+# yuechu-baseband-setup: explicitly enable the baseband on this Civi 3.
+#
+# The image ships the tested CCCI owner and ModemManager bundle but, like the
+# other boards, never starts the modem on its own.  This command does the
+# device-specific part on the device itself, then enables the services:
+#   - extracts this device's own vendor image (vendor_a in super) once,
+#   - writes /etc/default/mtk-ccci for the yuechu profile, pinned to the
+#     running kernel (re-run after a kernel update),
+#   - enables the data-path HIF modules and the baseband units.
+# NV stays read-only on its own partitions; nothing is copied off them.
+set -eu
+[ "$(id -u)" = 0 ] || { echo "run as root" >&2; exit 1; }
+[ -e /usr/lib/mtk-ccci/current ] || { echo "no baseband bundle installed" >&2; exit 1; }
+grep -q 'yuechu' /proc/device-tree/compatible 2>/dev/null || { echo "not a yuechu" >&2; exit 1; }
+
+VENDOR=/var/lib/mtk-ccci/vendor
+if [ ! -d "$VENDOR/etc" ]; then
+	super=$(readlink -f /dev/disk/by-partlabel/super)
+	img=$(mktemp /var/lib/mtk-ccci/vendor_a.XXXXXX)
+	echo "extracting vendor_a from $super"
+	python3 - "$super" "$img" <<'PY'
+import sys
+sys.path.insert(0, "/usr/local/lib/yuechu")
+import lp
+src, dst = sys.argv[1:3]
+with open(src, "rb") as fin, open(dst, "wb") as fout:
+    for off, size in lp.extents(src, "vendor_a"):
+        fin.seek(off)
+        while size:
+            chunk = fin.read(min(size, 1 << 20))
+            fout.write(chunk)
+            size -= len(chunk)
+PY
+	rm -rf "$VENDOR.new"
+	fsck.erofs --extract="$VENDOR.new" "$img" >/dev/null
+	rm -f "$img"
+	mv "$VENDOR.new" "$VENDOR"
+fi
+
+release=$(uname -r)
+notes=$(sha256sum /sys/kernel/notes | cut -d' ' -f1)
+cat > /etc/default/mtk-ccci.new <<EOF
+MTK_CCCI_BOARD=yuechu
+MTK_CCCI_EXPECTED_KERNEL=$release
+MTK_CCCI_EXPECTED_NOTES_SHA256=$notes
+MTK_CCCI_VENDOR_ROOT=/mnt/vendor
+MTK_CCCI_VENDOR_ETC_ROOT=/vendor
+MTK_CCCI_PRIVATE_ROOT=/var/lib/mtk-ccci/private
+MDINIT_OVERLAY_ROOT=/var/lib/mtk-ccci/overlay
+CCCI_EVIDENCE_DIR=/run/mtk-ccci/evidence
+MTK_CCCI_PROPERTY_TABLE=/etc/mtk-ccci/md_sys_props.conf
+QQC_MD_RAT_STR=N/C/Lf/Lt/W/G
+QQC_MD_TIME_TZ=32
+MTK_CCCI_ENABLE_MDLOG=0
+EOF
+mv /etc/default/mtk-ccci.new /etc/default/mtk-ccci
+touch /etc/yuechu/datapath-ok
+
+systemctl disable --now ModemManager.service 2>/dev/null || true
+systemctl enable yuechu-modem-prep.service mtk-ccci-owner.service mtk-modemmanager.service yuechu-ims.service
+echo "baseband enabled for kernel $release; reboot to start the modem"
