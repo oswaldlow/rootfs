@@ -40,6 +40,10 @@ fi
 
 release=$(uname -r)
 notes=$(sha256sum /sys/kernel/notes | cut -d' ' -f1)
+# MD time zone in quarter hours east of UTC, from the system zone (+0800 -> 32).
+z=$(date +%z)
+tz=$(( (10#${z:1:2} * 4 + 10#${z:3:2} / 15) ))
+[ "${z:0:1}" = - ] && tz=$(( -tz ))
 cat > /etc/default/mtk-ccci.new <<EOF
 MTK_CCCI_BOARD=yuechu
 MTK_CCCI_EXPECTED_KERNEL=$release
@@ -51,7 +55,7 @@ MDINIT_OVERLAY_ROOT=/var/lib/mtk-ccci/overlay
 CCCI_EVIDENCE_DIR=/run/mtk-ccci/evidence
 MTK_CCCI_PROPERTY_TABLE=/etc/mtk-ccci/md_sys_props.conf
 QQC_MD_RAT_STR=N/C/Lf/Lt/W/G
-QQC_MD_TIME_TZ=32
+QQC_MD_TIME_TZ=$tz
 MTK_CCCI_ENABLE_MDLOG=0
 EOF
 mv /etc/default/mtk-ccci.new /etc/default/mtk-ccci

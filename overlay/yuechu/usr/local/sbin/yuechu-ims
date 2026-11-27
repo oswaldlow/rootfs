@@ -14,8 +14,12 @@ An IMS PDN can get stuck: up, but the MD never registers on it again
 (seen after many re-registrations in one day; re-requesting or tearing the
 PDN down does not help).  After two PDN requests without registration the
 slot is re-attached (AT+COPS=2/0, not during a call, at most every 15 min),
-which resets its IMS state.  Re-attaching the data slot leaves the
-ModemManager bearer stale, so its NetworkManager connection is re-activated.
+which resets its IMS state.  A slot still not registered after two
+re-attaches (e.g. a SIM without VoLTE provisioning) is left alone until it
+registers or its SIM changes, so its data is not cut every 15 minutes.
+Re-attaching the data slot leaves the ModemManager bearer stale, so the
+NetworkManager connection of the SIM in that slot (matched by gsm.sim-id)
+is re-activated.
 
 After a CS fallback call the MD stays on GSM/EDGE.  Two polls on a GSM RAT
 outside a call re-send the initial attach setup (AT+EIAAPN/EIAREG/EDALLOW),
@@ -38,6 +42,7 @@ LTE_RATS = (7, 11, 12, 13)
 GSM_RATS = (0, 1, 3)
 PDN_TRIES_BEFORE_REATTACH = 2
 REATTACH_INTERVAL = 900
+MAX_REATTACHES = 2
 
 
 def log(msg):
@@ -95,15 +100,60 @@ def data_slot():
     return 0
 
 
-def reconnect_data():
-    out = subprocess.run(["nmcli", "-t", "-f", "NAME,TYPE", "c", "show", "--active"],
-                         capture_output=True, text=True).stdout
+def nmcli(*args):
+    return subprocess.run(["nmcli"] + list(args), capture_output=True, text=True)
+
+
+def nm_split(line):
+    """NAME:TYPE from nmcli -t, where ':' in NAME is escaped with a backslash."""
+    name, _, typ = line.rpartition(":")
+    return name.replace("\\:", ":"), typ
+
+
+def sim_iccid():
+    out = subprocess.run(["mmcli", "-m", "any", "-K"], capture_output=True, text=True).stdout
+    path = ""
     for line in out.splitlines():
-        name, _, typ = line.rpartition(":")
-        if typ == "gsm":
-            subprocess.run(["nmcli", "c", "down", name], capture_output=True)
-            r = subprocess.run(["nmcli", "c", "up", name], capture_output=True, text=True)
-            log("re-activated %s: %s" % (name, (r.stdout or r.stderr).strip()))
+        if line.startswith("modem.generic.sim "):
+            path = line.split(":", 1)[1].strip()
+    if not path.startswith("/"):
+        return ""
+    out = subprocess.run(["mmcli", "-i", path, "-K"], capture_output=True, text=True).stdout
+    for line in out.splitlines():
+        if line.startswith("sim.properties.iccid "):
+            return line.split(":", 1)[1].strip()
+    return ""
+
+
+def data_connection():
+    """The connection for the SIM in the data slot: the one bound to its
+    ICCID, else the active gsm one, else one not bound to any SIM."""
+    gsm = [n for n, t in map(nm_split, nmcli("-t", "-f", "NAME,TYPE", "c", "show").stdout.splitlines())
+           if t == "gsm"]
+    bound = {n: nmcli("-g", "gsm.sim-id", "c", "show", n).stdout.strip() for n in gsm}
+    iccid = sim_iccid()
+    for n in gsm:
+        if iccid and bound[n] == iccid:
+            return n
+    for n, t in map(nm_split, nmcli("-t", "-f", "NAME,TYPE", "c", "show", "--active").stdout.splitlines()):
+        if t == "gsm":
+            return n
+    for n in gsm:
+        if not bound[n]:
+            return n
+    return None
+
+
+def reconnect_data():
+    name = data_connection()
+    if not name:
+        log("no NetworkManager connection for the SIM in the data slot")
+        return
+    for n, t in map(nm_split, nmcli("-t", "-f", "NAME,TYPE", "c", "show", "--active").stdout.splitlines()):
+        if t == "gsm":
+            nmcli("c", "down", n)
+    r = nmcli("c", "up", name)
+    log("re-activated %s: %s" % (name, (r.stdout or r.stderr).strip()))
 
 
 def return_to_lte(m, ps):
@@ -134,6 +184,7 @@ def run():
     was = {}
     tries = {}
     last_reattach = {}
+    reattaches = {}
     on_gsm = {}
     while True:
         try:
@@ -142,6 +193,7 @@ def run():
                     present, rat = slot_state(m, ps)
                     if not present:
                         configured.discard(ps)
+                        reattaches.pop(ps, None)
                         continue
                     if ps not in configured:
                         res = configure(m, ps)
@@ -153,6 +205,7 @@ def run():
                         was[ps] = reg
                     if reg == 1:
                         tries[ps] = 0
+                        reattaches[ps] = 0
                         continue
                     if rat in GSM_RATS:
                         on_gsm[ps] = on_gsm.get(ps, 0) + 1
@@ -170,11 +223,19 @@ def run():
                     if time.time() - last_try.get(ps, 0) < 120:
                         continue
                     if (tries.get(ps, 0) >= PDN_TRIES_BEFORE_REATTACH and
+                            reattaches.get(ps, 0) >= MAX_REATTACHES):
+                        if reattaches[ps] == MAX_REATTACHES:
+                            log("slot %d: IMS not registered after %d re-attaches, leaving it "
+                                "until it registers or the SIM changes" % (ps, MAX_REATTACHES))
+                            reattaches[ps] += 1
+                        continue
+                    if (tries.get(ps, 0) >= PDN_TRIES_BEFORE_REATTACH and
                             time.time() - last_reattach.get(ps, 0) > REATTACH_INTERVAL and
                             not in_call(m, ps)):
                         log("slot %d: IMS PDN up but not registered after %d requests, re-attaching" %
                             (ps, tries[ps]))
                         last_reattach[ps] = time.time()
+                        reattaches[ps] = reattaches.get(ps, 0) + 1
                         tries[ps] = 0
                         reattach(m, ps)
                         if ps == data_slot():
