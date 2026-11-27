@@ -5,10 +5,10 @@ Usage: yuechu-repack-boot.py OLD_BOOT.img Image.gz OUT.img
 
 The yuechu LK only boots a gzip kernel and rejects a boot partition without an
 AVB footer, so finish with:
-  avbtool add_hash_footer --image OUT.img --partition_name boot       --partition_size 67108864 --algorithm NONE
+  avbtool add_hash_footer --image OUT.img --partition_name boot \
+      --partition_size 67108864 --algorithm NONE
 """
 import struct, sys
-# usage: repack.py old_boot.img new_Image.gz out.img  (v4 header, page 4096; keeps ramdisk)
 old, kern, out = sys.argv[1:4]
 PAGE = 4096
 b = open(old, "rb").read()
