@@ -76,12 +76,24 @@ jobs:
             e2fsprogs android-sdk-libsparse-utils pigz zstd kmod rsync \
             build-essential bc flex bison python3 multipath-tools \
             clang lld llvm binutils-aarch64-linux-gnu gcc-aarch64-linux-gnu cpio lz4 libssl-dev libelf-dev \
-            libncurses-dev dwarves git curl ca-certificates xz-utils
+            libncurses-dev dwarves git curl ca-certificates xz-utils ccache
           sudo update-binfmts --enable qemu-aarch64
           sudo arch-test arm64
           sudo git config --system --add safe.directory "$PWD/linux"
+      - name: ccache
+        if: ${{ !inputs.userspace_only }}
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-rootfs-${{ matrix.device }}-${{ github.run_id }}
+          restore-keys: |
+            ccache-rootfs-${{ matrix.device }}-
       - name: Build
         env:
+          CCACHE_DIR: /home/runner/.cache/ccache
+          CCACHE_MAXSIZE: 4G
+          CCACHE_COMPILERCHECK: content
+          CCACHE_SLOPPINESS: time_macros,include_file_mtime,include_file_ctime
           DEVICE: ${{ matrix.device }}
           DISTRO: ${{ matrix.distro }}
           KERNEL: ${{ matrix.kernel }}
@@ -100,7 +112,10 @@ jobs:
             args+=(--kernel-repo "$PWD/linux" --kernel-ref "$KERNEL")
           fi
           [ -z "$SUFFIX" ] || args+=(--name-suffix "$SUFFIX")
-          sudo -E bash ./build.sh "${args[@]}"
+          # LLVM=1 calls clang by name; the ccache masquerade dir wraps it.
+          sudo -E env PATH="/usr/lib/ccache:$PATH" bash ./build.sh "${args[@]}"
+          sudo chown -R "$(id -u):$(id -g)" "$CCACHE_DIR" 2>/dev/null || true
+          ccache -s || true
           cd out
           sha256sum -c SHA256SUMS
       - uses: actions/upload-artifact@v4
