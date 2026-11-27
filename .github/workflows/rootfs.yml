@@ -80,9 +80,9 @@ jobs:
           sudo update-binfmts --enable qemu-aarch64
           sudo arch-test arm64
           sudo git config --system --add safe.directory "$PWD/linux"
-      - name: ccache
+      - name: Restore ccache
         if: ${{ !inputs.userspace_only }}
-        uses: actions/cache@v4
+        uses: actions/cache/restore@v4
         with:
           path: ~/.cache/ccache
           key: ccache-rootfs-${{ matrix.device }}-${{ github.run_id }}
@@ -112,12 +112,34 @@ jobs:
             args+=(--kernel-repo "$PWD/linux" --kernel-ref "$KERNEL")
           fi
           [ -z "$SUFFIX" ] || args+=(--name-suffix "$SUFFIX")
-          # LLVM=1 calls clang by name; the ccache masquerade dir wraps it.
-          sudo -E env PATH="/usr/lib/ccache:$PATH" bash ./build.sh "${args[@]}"
-          sudo chown -R "$(id -u):$(id -g)" "$CCACHE_DIR" 2>/dev/null || true
-          ccache -s || true
+          # LLVM=1 calls clang by name, so put a ccache wrapper first in PATH
+          # (the same as CC="ccache clang", which build.sh cannot pass through
+          # its unquoted make arguments).  build.sh points ccache at its
+          # per-run kernel directory.
+          mkdir -p "$RUNNER_TEMP/ccbin" "$CCACHE_DIR"
+          printf '#!/bin/sh\nexec ccache %s "$@"\n' "$(command -v clang)" > "$RUNNER_TEMP/ccbin/clang"
+          chmod +x "$RUNNER_TEMP/ccbin/clang"
+          ccache -z
+          ccenv=(PATH="$RUNNER_TEMP/ccbin:$PATH" CCACHE_DIR="$CCACHE_DIR"
+                 CCACHE_MAXSIZE="$CCACHE_MAXSIZE" CCACHE_COMPILERCHECK="$CCACHE_COMPILERCHECK"
+                 CCACHE_SLOPPINESS="$CCACHE_SLOPPINESS" KBUILD_BUILD_TIMESTAMP=2026-01-01
+                 KBUILD_BUILD_USER=mt6895 KBUILD_BUILD_HOST=ci)
+          sudo -E env "${ccenv[@]}" bash ./build.sh "${args[@]}"
           cd out
           sha256sum -c SHA256SUMS
+      - name: ccache statistics
+        if: ${{ always() && !inputs.userspace_only }}
+        env:
+          CCACHE_DIR: /home/runner/.cache/ccache
+        run: |
+          sudo chown -R "$(id -u):$(id -g)" "$CCACHE_DIR" 2>/dev/null || true
+          ccache -s || true
+      - name: Save ccache
+        if: ${{ always() && !inputs.userspace_only }}
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-rootfs-${{ matrix.device }}-${{ github.run_id }}
       - uses: actions/upload-artifact@v4
         with:
           name: rootfs-${{ matrix.variant }}-${{ matrix.distro }}-${{ inputs.ui }}

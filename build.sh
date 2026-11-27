@@ -238,6 +238,12 @@ echo "kernel version in the Makefile: $KVER_MAKEFILE"
 
 kernel_git archive --format=tar "$KERNEL_REF" | tar -x -C "$KBOUT"
 cd "$KBOUT"
+# The tree is extracted to a new temporary directory on every run.  With debug
+# info ccache hashes the working directory, so nothing would ever be reused;
+# make it hash paths relative to this tree instead.
+if [ -n "${CCACHE_DIR:-}" ]; then
+	export CCACHE_BASEDIR="$KBOUT" CCACHE_NOHASHDIR=1
+fi
 
 log "1. kernel config"
 export ARCH
