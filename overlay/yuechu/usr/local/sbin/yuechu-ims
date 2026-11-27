@@ -17,19 +17,25 @@ slot is re-attached (AT+COPS=2/0, not during a call, at most every 15 min),
 which resets its IMS state.  Re-attaching the data slot leaves the
 ModemManager bearer stale, so its NetworkManager connection is re-activated.
 
+After a CS fallback call the MD stays on GSM/EDGE.  Two polls on a GSM RAT
+outside a call re-send the initial attach setup (AT+EIAAPN/EIAREG/EDALLOW),
+which brings it back to LTE.
+
   yuechu-ims            run (systemd service)
-  yuechu-ims status     print IMS registration per slot
+  yuechu-ims status     print IMS registration per slot (uses ttyCMIPC5)
 """
 import struct, subprocess, sys, time
 sys.path.insert(0, "/usr/local/lib/yuechu")
 import yuechu_mipc as mp
 
 DEV = "/dev/ttyCMIPC4"
+STATUS_DEV = "/dev/ttyCMIPC5"
 SLOTS = (1, 2)
 POLL = 30
 # volte, vilte, vowifi, viwifi, sms, eims
 IMSCFG = bytes([1, 0, 0, 0, 1, 1])
 LTE_RATS = (7, 11, 12, 13)
+GSM_RATS = (0, 1, 3)
 PDN_TRIES_BEFORE_REATTACH = 2
 REATTACH_INTERVAL = 900
 
@@ -100,6 +106,11 @@ def reconnect_data():
             log("re-activated %s: %s" % (name, (r.stdout or r.stderr).strip()))
 
 
+def return_to_lte(m, ps):
+    for cmd in ('AT+EIAAPN="",0', "AT+EIAREG=1", "AT+EDALLOW=1"):
+        m.at(ps, cmd)
+
+
 def reattach(m, ps):
     m.at(ps, "AT+COPS=2", timeout=60)
     time.sleep(5)
@@ -107,7 +118,8 @@ def reattach(m, ps):
 
 
 def status():
-    with mp.Mipc(DEV) as m:
+    # The daemon holds DEV; status uses its own port.
+    with mp.Mipc(STATUS_DEV) as m:
         for ps in SLOTS:
             ok, rat = slot_state(m, ps)
             reg, ext = cireg(m, ps)
@@ -122,6 +134,7 @@ def run():
     was = {}
     tries = {}
     last_reattach = {}
+    on_gsm = {}
     while True:
         try:
             with mp.Mipc(DEV) as m:
@@ -141,6 +154,17 @@ def run():
                     if reg == 1:
                         tries[ps] = 0
                         continue
+                    if rat in GSM_RATS:
+                        on_gsm[ps] = on_gsm.get(ps, 0) + 1
+                        if on_gsm[ps] >= 2 and not in_call(m, ps):
+                            log("slot %d: on GSM RAT %d outside a call, re-sending the LTE attach setup" % (ps, rat))
+                            on_gsm[ps] = 0
+                            return_to_lte(m, ps)
+                            if ps == data_slot():
+                                time.sleep(15)
+                                reconnect_data()
+                        continue
+                    on_gsm[ps] = 0
                     if rat not in LTE_RATS:
                         continue
                     if time.time() - last_try.get(ps, 0) < 120:
