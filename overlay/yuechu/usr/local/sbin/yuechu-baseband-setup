@@ -15,6 +15,8 @@ set -eu
 grep -q 'yuechu' /proc/device-tree/compatible 2>/dev/null || { echo "not a yuechu" >&2; exit 1; }
 
 VENDOR=/var/lib/mtk-ccci/vendor
+# Nothing creates the state directory on a fresh image.
+mkdir -p /var/lib/mtk-ccci/private /var/lib/mtk-ccci/overlay /etc/mtk-ccci
 if [ ! -d "$VENDOR/etc" ]; then
 	super=$(readlink -f /dev/disk/by-partlabel/super)
 	img=$(mktemp /var/lib/mtk-ccci/vendor_a.XXXXXX)
@@ -42,8 +44,10 @@ release=$(uname -r)
 notes=$(sha256sum /sys/kernel/notes | cut -d' ' -f1)
 # MD time zone in quarter hours east of UTC, from the system zone (+0800 -> 32).
 z=$(date +%z)
-tz=$(( (10#${z:1:2} * 4 + 10#${z:3:2} / 15) ))
-[ "${z:0:1}" = - ] && tz=$(( -tz ))
+h=$(echo "$z" | cut -c2-3)
+m=$(echo "$z" | cut -c4-5)
+tz=$(( ${h#0} * 4 + ${m#0} / 15 ))
+case "$z" in -*) tz=$(( -tz )) ;; esac
 cat > /etc/default/mtk-ccci.new <<EOF
 MTK_CCCI_BOARD=yuechu
 MTK_CCCI_EXPECTED_KERNEL=$release
