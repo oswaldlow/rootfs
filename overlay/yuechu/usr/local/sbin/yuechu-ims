@@ -10,10 +10,17 @@ framework does and Linux never did.  Per slot this daemon:
     registered, requests the IMS PDN (DATA_ACT_CALL, APN "ims", type ims).
 The PDN is owned by the MD and outlives this process.
 
+An IMS PDN can get stuck: up, but the MD never registers on it again
+(seen after many re-registrations in one day; re-requesting or tearing the
+PDN down does not help).  After two PDN requests without registration the
+slot is re-attached (AT+COPS=2/0, not during a call, at most every 15 min),
+which resets its IMS state.  Re-attaching the data slot leaves the
+ModemManager bearer stale, so its NetworkManager connection is re-activated.
+
   yuechu-ims            run (systemd service)
   yuechu-ims status     print IMS registration per slot
 """
-import struct, sys, time
+import struct, subprocess, sys, time
 sys.path.insert(0, "/usr/local/lib/yuechu")
 import yuechu_mipc as mp
 
@@ -23,6 +30,8 @@ POLL = 30
 # volte, vilte, vowifi, viwifi, sms, eims
 IMSCFG = bytes([1, 0, 0, 0, 1, 1])
 LTE_RATS = (7, 11, 12, 13)
+PDN_TRIES_BEFORE_REATTACH = 2
+REATTACH_INTERVAL = 900
 
 
 def log(msg):
@@ -65,6 +74,38 @@ def configure(m, ps):
     return mp.result(r)
 
 
+def in_call(m, ps):
+    return "+CLCC:" in m.at(ps, "AT+CLCC")
+
+
+def data_slot():
+    out = subprocess.run(["mmcli", "-m", "any", "-K"], capture_output=True, text=True).stdout
+    for line in out.splitlines():
+        if "modem.generic.primary-sim-slot" in line:
+            try:
+                return int(line.split(":", 1)[1])
+            except ValueError:
+                return 0
+    return 0
+
+
+def reconnect_data():
+    out = subprocess.run(["nmcli", "-t", "-f", "NAME,TYPE", "c", "show", "--active"],
+                         capture_output=True, text=True).stdout
+    for line in out.splitlines():
+        name, _, typ = line.rpartition(":")
+        if typ == "gsm":
+            subprocess.run(["nmcli", "c", "down", name], capture_output=True)
+            r = subprocess.run(["nmcli", "c", "up", name], capture_output=True, text=True)
+            log("re-activated %s: %s" % (name, (r.stdout or r.stderr).strip()))
+
+
+def reattach(m, ps):
+    m.at(ps, "AT+COPS=2", timeout=60)
+    time.sleep(5)
+    m.at(ps, "AT+COPS=0", timeout=60)
+
+
 def status():
     with mp.Mipc(DEV) as m:
         for ps in SLOTS:
@@ -79,6 +120,8 @@ def run():
     configured = set()
     last_try = {}
     was = {}
+    tries = {}
+    last_reattach = {}
     while True:
         try:
             with mp.Mipc(DEV) as m:
@@ -95,11 +138,28 @@ def run():
                     if reg != was.get(ps):
                         log("slot %d: IMS %s (ext %s, rat %s)" % (ps, "registered" if reg == 1 else "not registered", ext, rat))
                         was[ps] = reg
-                    if reg == 1 or rat not in LTE_RATS:
+                    if reg == 1:
+                        tries[ps] = 0
+                        continue
+                    if rat not in LTE_RATS:
                         continue
                     if time.time() - last_try.get(ps, 0) < 120:
                         continue
+                    if (tries.get(ps, 0) >= PDN_TRIES_BEFORE_REATTACH and
+                            time.time() - last_reattach.get(ps, 0) > REATTACH_INTERVAL and
+                            not in_call(m, ps)):
+                        log("slot %d: IMS PDN up but not registered after %d requests, re-attaching" %
+                            (ps, tries[ps]))
+                        last_reattach[ps] = time.time()
+                        tries[ps] = 0
+                        reattach(m, ps)
+                        if ps == data_slot():
+                            time.sleep(10)
+                            reconnect_data()
+                        last_try[ps] = 0
+                        continue
                     last_try[ps] = time.time()
+                    tries[ps] = tries.get(ps, 0) + 1
                     r = m.req(mp.DATA_ACT_CALL_REQ, ps, ims_pdn_request(), timeout=40)
                     log("slot %d: requested IMS PDN, result 0x%x call id %s" %
                         (ps, mp.result(r) or 0, r.get(0x0100, b"?").hex()))
