@@ -76,7 +76,7 @@ def validate_baseband(root, bundle_path=None):
     manifest_path = (rooted(root, bundle_path) / "manifest.json" if bundle_path else
                      root / "usr/share/mt6895-build/baseband.json")
     manifest = json.loads(manifest_path.read_text())
-    if (manifest.get("schema") != 1 or manifest.get("device") != "qqcandy" or
+    if (manifest.get("schema") != 1 or manifest.get("device") not in ("qqcandy", "yuechu") or
             manifest.get("distro") not in ("mobian", "debian", "arch", "nura") or
             manifest.get("autostart") is not False or manifest.get("hardware_validated") is not False):
         raise ValueError("invalid baseband installation or hardware claims")
