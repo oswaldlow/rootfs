@@ -17,9 +17,8 @@ slot is re-attached (AT+COPS=2/0, not during a call, at most every 15 min),
 which resets its IMS state.  A slot still not registered after two
 re-attaches (e.g. a SIM without VoLTE provisioning) is left alone until it
 registers or its SIM changes, so its data is not cut every 15 minutes.
-Re-attaching the data slot leaves the ModemManager bearer stale, so the
-NetworkManager connection of the SIM in that slot (matched by gsm.sim-id)
-is re-activated.
+A re-attach releases the data call of that slot; the ModemManager bearer
+notices and NetworkManager brings the connection up again.
 
 After a CS fallback call the MD stays on GSM/EDGE.  Two polls on a GSM RAT
 outside a call re-send the initial attach setup (AT+EIAAPN/EIAREG/EDALLOW),
@@ -28,7 +27,7 @@ which brings it back to LTE.
   yuechu-ims            run (systemd service)
   yuechu-ims status     print IMS registration per slot (uses ttyCMIPC5)
 """
-import struct, subprocess, sys, time
+import struct, sys, time
 sys.path.insert(0, "/usr/local/lib/yuechu")
 import yuechu_mipc as mp
 
@@ -89,73 +88,6 @@ def in_call(m, ps):
     return "+CLCC:" in m.at(ps, "AT+CLCC")
 
 
-def data_slot():
-    out = subprocess.run(["mmcli", "-m", "any", "-K"], capture_output=True, text=True).stdout
-    for line in out.splitlines():
-        if "modem.generic.primary-sim-slot" in line:
-            try:
-                return int(line.split(":", 1)[1])
-            except ValueError:
-                return 0
-    return 0
-
-
-def nmcli(*args):
-    return subprocess.run(["nmcli"] + list(args), capture_output=True, text=True)
-
-
-def nm_split(line):
-    """NAME:TYPE from nmcli -t, where ':' in NAME is escaped with a backslash."""
-    name, _, typ = line.rpartition(":")
-    return name.replace("\\:", ":"), typ
-
-
-def sim_iccid():
-    out = subprocess.run(["mmcli", "-m", "any", "-K"], capture_output=True, text=True).stdout
-    path = ""
-    for line in out.splitlines():
-        if line.startswith("modem.generic.sim "):
-            path = line.split(":", 1)[1].strip()
-    if not path.startswith("/"):
-        return ""
-    out = subprocess.run(["mmcli", "-i", path, "-K"], capture_output=True, text=True).stdout
-    for line in out.splitlines():
-        if line.startswith("sim.properties.iccid "):
-            return line.split(":", 1)[1].strip()
-    return ""
-
-
-def data_connection():
-    """The connection for the SIM in the data slot: the one bound to its
-    ICCID, else the active gsm one, else one not bound to any SIM."""
-    gsm = [n for n, t in map(nm_split, nmcli("-t", "-f", "NAME,TYPE", "c", "show").stdout.splitlines())
-           if t == "gsm"]
-    bound = {n: nmcli("-g", "gsm.sim-id", "c", "show", n).stdout.strip() for n in gsm}
-    iccid = sim_iccid()
-    for n in gsm:
-        if iccid and bound[n] == iccid:
-            return n
-    for n, t in map(nm_split, nmcli("-t", "-f", "NAME,TYPE", "c", "show", "--active").stdout.splitlines()):
-        if t == "gsm":
-            return n
-    for n in gsm:
-        if not bound[n]:
-            return n
-    return None
-
-
-def reconnect_data():
-    name = data_connection()
-    if not name:
-        log("no NetworkManager connection for the SIM in the data slot")
-        return
-    for n, t in map(nm_split, nmcli("-t", "-f", "NAME,TYPE", "c", "show", "--active").stdout.splitlines()):
-        if t == "gsm":
-            nmcli("c", "down", n)
-    r = nmcli("c", "up", name)
-    log("re-activated %s: %s" % (name, (r.stdout or r.stderr).strip()))
-
-
 def return_to_lte(m, ps):
     for cmd in ('AT+EIAAPN="",0', "AT+EIAREG=1", "AT+EDALLOW=1"):
         m.at(ps, cmd)
@@ -213,9 +145,6 @@ def run():
                             log("slot %d: on GSM RAT %d outside a call, re-sending the LTE attach setup" % (ps, rat))
                             on_gsm[ps] = 0
                             return_to_lte(m, ps)
-                            if ps == data_slot():
-                                time.sleep(15)
-                                reconnect_data()
                         continue
                     on_gsm[ps] = 0
                     if rat not in LTE_RATS:
@@ -238,9 +167,6 @@ def run():
                         reattaches[ps] = reattaches.get(ps, 0) + 1
                         tries[ps] = 0
                         reattach(m, ps)
-                        if ps == data_slot():
-                            time.sleep(10)
-                            reconnect_data()
                         last_try[ps] = 0
                         continue
                     last_try[ps] = time.time()
