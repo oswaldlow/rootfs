@@ -1,0 +1,11 @@
+[Unit]
+Description=yuechu: reboot once when a USB power-on left the modem disabled
+ConditionPathExists=/etc/default/mtk-ccci
+After=local-fs.target
+
+[Service]
+Type=exec
+ExecStart=/usr/local/sbin/yuechu-modem-bootcheck
+
+[Install]
+WantedBy=multi-user.target

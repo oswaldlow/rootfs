@@ -14,4 +14,8 @@ device_finalize() {
 
 	# USB NCM gadget (169.254.42.1) for first access before WiFi is set up.
 	systemctl --root="$root" enable yuechu-usbnet.service
+
+	# Recover from a USB power-on, where the bootloader skips the modem.
+	# Does nothing until yuechu-baseband-setup has enabled the baseband.
+	systemctl --root="$root" enable yuechu-modem-bootcheck.service
 }
