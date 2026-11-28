@@ -1,0 +1,14 @@
+#!/bin/sh
+# yuechu: NetworkManager auto-activates a gsm profile as soon as the modem
+# appears, before it knows the SIM, so gsm.sim-id does not stop it from
+# picking a profile that belongs to another SIM (seen on a fresh install,
+# where no profile has a "last used" timestamp).  When a gsm connection comes
+# up, let yuechu-sim check it and switch to the profile bound to the data SIM.
+[ "${2:-}" = up ] || exit 0
+[ -n "${CONNECTION_UUID:-}" ] || exit 0
+[ "$(nmcli -g connection.type connection show "$CONNECTION_UUID" 2>/dev/null)" = gsm ] || exit 0
+# Not from inside the dispatcher: the check talks to NetworkManager and may
+# activate another connection.  A run that is still going covers this event.
+systemd-run --quiet --no-block --collect --unit=yuechu-sim-profile \
+	/usr/local/bin/yuechu-sim profile 2>/dev/null || true
+exit 0

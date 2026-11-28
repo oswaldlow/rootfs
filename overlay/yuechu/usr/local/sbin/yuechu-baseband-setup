@@ -66,5 +66,5 @@ mv /etc/default/mtk-ccci.new /etc/default/mtk-ccci
 touch /etc/yuechu/datapath-ok
 
 systemctl disable --now ModemManager.service 2>/dev/null || true
-systemctl enable yuechu-modem-prep.service mtk-ccci-owner.service mtk-modemmanager.service yuechu-ims.service
+systemctl enable yuechu-modem-prep.service mtk-ccci-owner.service mtk-modemmanager.service yuechu-ims.service yuechu-sim-follow.service
 echo "baseband enabled for kernel $release; reboot to start the modem"

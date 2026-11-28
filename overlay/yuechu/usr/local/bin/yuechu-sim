@@ -5,10 +5,24 @@
   yuechu-sim data 1|2      make slot N the data SIM (AT+ESIMMAP via ModemManager)
                            and bring up the NetworkManager gsm profile bound to
                            that SIM's ICCID (gsm.sim-id)
+  yuechu-sim profile       if the active gsm profile is bound to another SIM,
+                           bring up the one bound to the data SIM's ICCID
+  yuechu-sim follow        run (systemd service): keep ModemManager on a slot
+                           that has a SIM and make it notice a swapped SIM
 
 Both slots stay registered (DSDS) whichever one carries data.  Status comes
 from MIPC (/dev/ttyCMIPC2, ps = physical slot); ModemManager only models the
 data SIM.
+
+ModemManager does not follow SIM hot-plug on this modem: after a swap it keeps
+the old ICCID until it is restarted, and with the only SIM in the slot that is
+not the data slot it reports "sim-missing" and there is no data.  "follow"
+reads the ICCID of both slots and the data slot from the modem itself
+(AT+ICCID?, AT+ESIMMAP? over /dev/ttyCMIPC7) every 10 s and, once the same
+problem has been there for four polls,
+  - moves the data slot to a slot that has a SIM when the current one is empty;
+  - restarts mtk-modemmanager when its SIM is not the one in the data slot.
+At most three corrections are made for one set of SIMs.
 """
 import os, re, select, struct, subprocess, sys, time
 
@@ -17,6 +31,11 @@ sys.path.insert(0, "/usr/local/lib/yuechu")
 from yuechu_mipc import Mipc, text
 
 DEV = "/dev/ttyCMIPC2"
+# ModemManager holds ttyCMIPC1 and, while a data call is up, ttyCMIPC6.
+FOLLOW_DEV = "/dev/ttyCMIPC7"
+FOLLOW_POLL = 10
+FOLLOW_SETTLE = 4
+FOLLOW_MAX_FIXES = 3
 RAT = {0: "GSM", 1: "GSM", 2: "UMTS", 3: "EDGE", 4: "HSDPA", 5: "HSUPA", 6: "HSPA",
        7: "LTE", 11: "NR5G-NSA", 12: "NR5G", 13: "NR5G"}
 REG = {0: "not registered", 1: "home", 2: "searching", 3: "denied", 4: "unknown", 5: "roaming"}
@@ -52,6 +71,121 @@ def status():
         print("        network %s %s, %s, %s" % (text(reg.get(0x0107)), text(reg.get(0x0108)),
                                                 REG.get(st, "stat %d" % st), RAT.get(r, "rat %d" % r)))
 
+def gsm_profiles(active=False):
+    """(name, gsm.sim-id) of the NetworkManager gsm profiles."""
+    cmd = ["nmcli", "-t", "-f", "NAME,TYPE", "c", "show"] + (["--active"] if active else [])
+    res = []
+    for l in subprocess.run(cmd, capture_output=True, text=True).stdout.splitlines():
+        name, _, typ = l.rpartition(":")
+        if typ == "gsm":
+            sid = subprocess.run(["nmcli", "-g", "gsm.sim-id", "c", "show", name], capture_output=True, text=True).stdout.strip()
+            res.append((name, sid))
+    return res
+
+def profile():
+    # NetworkManager auto-activates a gsm profile as soon as the modem shows up,
+    # before it knows the SIM, so gsm.sim-id does not hold it back: with no
+    # "last used" timestamps (fresh install) or after a SIM swap it can pick a
+    # profile bound to another SIM and dial that operator's APN.
+    iccid = "?"
+    for _ in range(15):
+        sims, primary = slot_iccids()
+        iccid = sims.get(primary, ("?", ""))[0]
+        if iccid != "?":
+            break
+        time.sleep(2)
+    if iccid == "?":
+        sys.exit("data SIM ICCID not known, leaving the gsm profile alone")
+    wrong = [name for name, sid in gsm_profiles(active=True) if sid and sid != iccid]
+    if not wrong:
+        return
+    match = [name for name, sid in gsm_profiles() if sid == iccid]
+    if not match:
+        sys.exit("active gsm profile %s is bound to another SIM; no profile with gsm.sim-id %s"
+                 % (", ".join(wrong), iccid))
+    print("gsm profile %s is bound to another SIM, switching to %s (ICCID %s)"
+          % (", ".join(wrong), match[0], iccid))
+    r = subprocess.run(["nmcli", "c", "up", match[0]], capture_output=True, text=True)
+    print((r.stdout or r.stderr).strip())
+
+def modem_sims():
+    """({slot: ICCID}, data slot) as the modem itself reports them.
+
+    ModemManager is not asked: in the "sim-missing" state it still lists the
+    SIM under slot 1 as the primary slot whatever AT+ESIMMAP says.
+    """
+    res, slot = {}, 0
+    with Mipc(FOLLOW_DEV) as m:
+        for ps in (1, 2):
+            r = re.search(r"\+ICCID:\s*([0-9A-Fa-f]+)", m.at(ps, "AT+ICCID?") or "")
+            if r:
+                res[ps] = r.group(1).rstrip("fF")
+        r = re.search(r"\+ESIMMAP:\s*(\d+)", m.at(1, "AT+ESIMMAP?") or "")
+        if r:
+            slot = int(r.group(1)).bit_length()     # mask 1 << (slot - 1)
+    return res, slot
+
+def mm_sim_iccid():
+    """ICCID of the SIM ModemManager works with, "" if none, None if no modem."""
+    out = mm("-K")
+    if "modem.generic.sim-slots" not in out:
+        return None
+    p = re.search(r"modem\.generic\.sim\s*:\s*(\S+)", out)
+    if not p or not p.group(1).startswith("/"):
+        return ""
+    s = subprocess.run(["mmcli", "-i", p.group(1).rsplit("/", 1)[1], "-K"], capture_output=True, text=True).stdout
+    m = re.search(r"sim\.properties\.iccid\s*:\s*(\S+)", s)
+    return m.group(1) if m and m.group(1) != "--" else ""
+
+def follow():
+    def log(msg):
+        print(msg, flush=True)
+    seen, fixes, hold, last, count = None, 0, 0, None, 0
+    while True:
+        time.sleep(FOLLOW_POLL)
+        try:
+            real, slot = modem_sims()
+        except (OSError, AttributeError) as e:
+            # AttributeError: a request timed out and returned nothing
+            log("MIPC error: %s" % e)
+            continue
+        if real != seen:
+            if seen is not None:
+                log("SIMs changed: %s" % (", ".join("slot %d %s" % kv for kv in sorted(real.items())) or "none"))
+            seen, fixes = real, 0
+        have = mm_sim_iccid()
+        # have is None while ModemManager has no modem object.
+        if not real or not slot or have is None:
+            wrong = None
+        elif slot not in real:
+            wrong = ("slot", min(real))
+        elif have != real[slot]:
+            wrong = ("sim", have)
+        else:
+            wrong = None
+        count = count + 1 if wrong and wrong == last else 1
+        last = wrong
+        # Act only on a picture that held for FOLLOW_SETTLE polls: a SIM being
+        # swapped, a data-slot switch and a starting ModemManager all look
+        # wrong for a while.
+        if not wrong or count < FOLLOW_SETTLE or time.time() < hold or fixes >= FOLLOW_MAX_FIXES:
+            continue
+        if wrong[0] == "slot":
+            to = wrong[1]
+            log("data slot %d has no SIM, moving the data slot to %d (ICCID %s)" % (slot, to, real[to]))
+            out = mm("--set-primary-sim-slot=%d" % to).strip()
+            if out:
+                log(out)
+        else:
+            log("ModemManager has SIM %s, the modem has %s in data slot %d: restarting mtk-modemmanager"
+                % (have or "none", real[slot], slot))
+            subprocess.run(["systemctl", "restart", "mtk-modemmanager.service"])
+        fixes += 1
+        last, count = None, 0
+        hold = time.time() + 60
+        if fixes == FOLLOW_MAX_FIXES:
+            log("%d corrections for these SIMs, leaving it until the SIMs change" % fixes)
+
 def data(slot):
     sims, primary = slot_iccids()
     if slot not in sims:
@@ -66,14 +200,11 @@ def data(slot):
                 break
     iccid = sims[slot][0]
     con = None
-    for l in subprocess.run(["nmcli", "-t", "-f", "NAME,TYPE", "c"], capture_output=True, text=True).stdout.splitlines():
-        name, _, typ = l.rpartition(":")
-        if typ == "gsm":
-            sid = subprocess.run(["nmcli", "-g", "gsm.sim-id", "c", "show", name], capture_output=True, text=True).stdout.strip()
-            if sid == iccid:
-                con = name
-            else:
-                subprocess.run(["nmcli", "c", "down", name], capture_output=True)
+    for name, sid in gsm_profiles():
+        if sid == iccid:
+            con = name
+        else:
+            subprocess.run(["nmcli", "c", "down", name], capture_output=True)
     if not con:
         sys.exit("no NetworkManager gsm profile with gsm.sim-id %s" % iccid)
     r = subprocess.run(["nmcli", "c", "up", con], capture_output=True, text=True)
@@ -82,6 +213,10 @@ def data(slot):
 if __name__ == "__main__":
     if len(sys.argv) == 3 and sys.argv[1] == "data" and sys.argv[2] in ("1", "2"):
         data(int(sys.argv[2]))
+    elif len(sys.argv) == 2 and sys.argv[1] == "profile":
+        profile()
+    elif len(sys.argv) == 2 and sys.argv[1] == "follow":
+        follow()
     elif len(sys.argv) <= 2 and (len(sys.argv) == 1 or sys.argv[1] == "status"):
         status()
     else:

@@ -1,0 +1,15 @@
+[Unit]
+Description=Follow SIM hot-plug: data slot with a SIM, ModemManager on the current SIM
+After=mtk-modemmanager.service
+Requires=mtk-ccci-owner.service
+After=mtk-ccci-owner.service
+
+[Service]
+Type=simple
+ExecStartPre=/bin/sh -c 'for i in $(seq 1 120); do grep -q "^md1:4" /sys/kernel/ccci/boot && exit 0; sleep 1; done; exit 1'
+ExecStart=/usr/local/bin/yuechu-sim follow
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
